@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+   <meta charset="UTF-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+   <title>Jeu Réseau avec Three.js</title>
+   <style>
+       body { margin: 0; overflow: hidden; }
+   </style>
+</head>
+<body>
+    <div id="team-selection" style="display: flex; justify-content: center; align-items: center; height: 100vh; flex-direction: column;">
+        <h1 style="font-size: 2em; margin-bottom: 20px;">Choisissez votre équipe</h1>
+        <div style="display: flex; justify-content: space-around; width: 300px;">
+            <button id="team1" style="padding: 10px 20px; font-size: 1.2em; background-color: red; color: white;">Équipe 1</button>
+            <button id="team2" style="padding: 10px 20px; font-size: 1.2em; background-color: blue; color: white;">Équipe 2</button>
+        </div>
+    </div>
+<script src="/socket.io/socket.io.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+    // Connexion au serveur Socket.IO
+    const socket = io();
+
+    // Création de la scène Three.js
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // Création d'un plan au sol
+    const geometry = new THREE.PlaneGeometry(20, 20);
+    const material = new THREE.MeshBasicMaterial({ color: 0x006400, side: THREE.DoubleSide });
+    const plane = new THREE.Mesh(geometry, material);
+    plane.rotation.x = Math.PI / 2;
+    scene.add(plane);
+
+    // Ajout d'une sphère (la balle) dans la scène
+    const ballGeometry = new THREE.SphereGeometry(0.5, 32, 32);
+    const ballMaterial = new THREE.MeshBasicMaterial({ color: 0xFF0000 });
+    const ball = new THREE.Mesh(ballGeometry, ballMaterial);
+    ball.position.set(0, 0.5, 0); // Positionnement de la balle
+    scene.add(ball);
+
+    let ballVelocity = new THREE.Vector3(0, 0, 0);
+
+    // Liste des cubes joueurs et colliders
+    const players = {};
+    const colliders = {};
+    const wallColliders = [];
+    const goals = [];
+
+    // Création d'un mur autour du plan
+    const wallWidth = 20; // Largeur du mur (identique à celle du plan)
+    const wallHeight = 2; // Hauteur du mur
+    const cubeSize = 1; // Taille des cubes
+
+    function createWall() {
+        const wallMaterial = new THREE.MeshBasicMaterial({ color: 0x808080 });
+        const wallGeometry = new THREE.BoxGeometry(cubeSize, cubeSize, cubeSize);
+
+        // Création des cubes du mur
+        for (let x = -wallWidth / 2; x <= wallWidth / 2; x += cubeSize) {
+            for (let y = 0; y < wallHeight; y += cubeSize) {
+                // Création des cubes du bas et du haut
+                createWallCube(x, y, -wallWidth / 2);
+                createWallCube(x, y, wallWidth / 2);
+            }
+        }
+
+        for (let z = -wallWidth / 2; z <= wallWidth / 2; z += cubeSize) {
+            for (let y = 0; y < wallHeight; y += cubeSize) {
+                // Création des cubes de gauche et de droite
+                createWallCube(-wallWidth / 2, y, z);
+                createWallCube(wallWidth / 2, y, z);
+            }
+        }
+
+        function createWallCube(x, y, z) {
+            const cube = new THREE.Mesh(wallGeometry, wallMaterial);
+            cube.position.set(x, y + 0.5, z); // Positionnement du cube
+            scene.add(cube);
+
+            // Créer un collider (bounding box) pour ce cube
+            const collider = new THREE.Box3().setFromObject(cube);
+            wallColliders.push(collider); // Ajouter le collider à la liste des colliders des murs
+        }
+    }
+
+    // Création du mur
+    createWall();
+
+    // Création des buts
+    function createGoals() {
+        const goalMaterial = new THREE.MeshBasicMaterial({ color: 0xFFFFFF }); // Couleur des buts
+        const goalGeometry = new THREE.BoxGeometry(1.01, 4.01, 3); // Taille des buts
+
+        // Création des buts de chaque côté du plan
+        createGoal(-wallWidth / 2, 0, 0);
+        createGoal(wallWidth / 2, 0, 0);
+
+        function createGoal(x, y, z) {
+            const goal = new THREE.Mesh(goalGeometry, goalMaterial);
+            goal.position.set(x, y, z); // Positionnement du but
+            scene.add(goal);
+
+            // Ajouter le but à la liste des buts
+            goals.push(goal);
+        }
+    }
+
+    // Création des buts
+    createGoals();
+
+    // Création de cubes pour chaque joueur avec un collider
+    function createPlayerCube(player) {
+        const geometry = new THREE.BoxGeometry(1, 1, 1);
+        const material = new THREE.MeshBasicMaterial({ color: player.color });
+        const cube = new THREE.Mesh(geometry, material);
+        cube.position.set(player.x, player.y, player.z);
+        scene.add(cube);
+
+        // Créer un collider (bounding box) pour ce cube
+        const collider = new THREE.Box3().setFromObject(cube);
+        colliders[player.id] = collider;
+
+        return cube;
+    }
+
+    // Initialisation des joueurs lorsque la connexion est établie
+    socket.on('init', (serverPlayers) => {
+        for (let id in serverPlayers) {
+            players[id] = createPlayerCube(serverPlayers[id]);
+        }
+    });
+
+    // Ajout d'un nouveau joueur
+    socket.on('newPlayer', (player) => {
+        players[player.id] = createPlayerCube(player);
+    });
+
+    // Mise à jour de la position des joueurs et des colliders
+    socket.on('playerMoved', (player) => {
+        if (players[player.id]) {
+            players[player.id].position.set(player.x, player.y, player.z);
+
+            // Mettre à jour le collider du joueur déplacé
+            colliders[player.id].setFromObject(players[player.id]);
+
+            // Vérifier si la balle touche le joueur
+            const playerPosition = new THREE.Vector3(player.x, player.y, player.z);
+            if (ball.position.distanceTo(playerPosition) < 1) {
+                // La balle touche le joueur, mettre à jour la vitesse de la balle
+                ballVelocity.subVectors(ball.position, playerPosition).normalize().multiplyScalar(0.1);
+            }
+        }
+    });
+
+    // Suppression d'un joueur déconnecté
+    socket.on('playerDisconnected', (id) => {
+        if (players[id]) {
+            scene.remove(players[id]);
+            delete players[id];
+            delete colliders[id]; // Supprimer également le collider
+        }
+    });
+
+    // Contrôle du joueur local (utilisation des touches de direction)
+    const moveSpeed = 0.3;
+    document.addEventListener('keydown', (event) => {
+        const player = players[socket.id];
+        if (player) {
+            let prevPosition = player.position.clone(); // Stocker l'ancienne position
+
+            if (event.key === 'ArrowUp') player.position.z -= moveSpeed;
+            if (event.key === 'ArrowDown') player.position.z += moveSpeed;
+            if (event.key === 'ArrowLeft') player.position.x -= moveSpeed;
+            if (event.key === 'ArrowRight') player.position.x += moveSpeed;
+
+            // Mettre à jour le collider du joueur
+            colliders[socket.id].setFromObject(player);
+
+            // Vérifier les collisions avec les autres joueurs et les murs
+            let collisionDetected = false;
+            for (let id in colliders) {
+                if (id !== socket.id) {
+                    if (colliders[socket.id].intersectsBox(colliders[id])) {
+                        collisionDetected = true;
+                        break;
+                    }
+                    // Vérifier les collisions avec les murs
+                    for (let collider of wallColliders) {
+                        if (colliders[socket.id].intersectsBox(collider)) {
+                            collisionDetected = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Si collision, annuler le mouvement
+            if (collisionDetected) {
+                player.position.copy(prevPosition);
+            } else {
+                // Envoi des nouvelles positions au serveur uniquement si pas de collision
+                socket.emit('move', { x: player.position.x, z: player.position.z });
+            }
+        }   
+    });
+
+    // Positionnement de la caméra
+    camera.position.set(0, 15, 15);
+    camera.lookAt(0, 0, 0);
+
+    // Fonction de rendu
+    const groundHeight = 0.5; // La hauteur du terrain
+    const initialBallPosition = new THREE.Vector3(0, 0.5, 0); // La position initiale de la balle
+    function animate() {
+        requestAnimationFrame(animate);
+
+        // Mettre à jour la position de la balle
+        ball.position.add(ballVelocity);
+
+        // Vérifier si la balle est trop élevée
+        if (ball.position.y > groundHeight) {
+            ball.position.y = groundHeight;
+        }
+
+        // Vérifier si la balle est dans un but
+        for (let goal of goals) {
+            if (new THREE.Box3().setFromObject(ball).intersectsBox(new THREE.Box3().setFromObject(goal))) {
+                if (ball.position.x < -wallWidth / 2) {
+                    alert("Équipe 2 a marqué !");
+                    ball.position.copy(initialBallPosition);
+                    ballVelocity.set(0, 0, 0);
+                } else if (ball.position.x > wallWidth / 2) {
+                    alert("Équipe 1 a marqué !");
+                    ball.position.copy(initialBallPosition);
+                    ballVelocity.set(0, 0, 0);
+                }
+            }
+        }
+
+        // Vérifier si la balle est toujours à l'intérieur des limites du plan
+        if (!isBallWithinBounds()) {
+            // La balle est hors des limites, inverser la direction de la balle
+            ballVelocity.x *= -1;
+            ballVelocity.z *= -1;
+        }
+
+        renderer.render(scene, camera);
+    }
+
+    // Fonction pour vérifier si la balle est à l'intérieur des limites du plan
+    function isBallWithinBounds() {
+        const halfWidth = 10; // La moitié de la largeur du plan
+        const halfHeight = 10; // La moitié de la hauteur du plan
+
+        return (
+            ball.position.x >= -halfWidth &&
+            ball.position.x <= halfWidth &&
+            ball.position.z >= -halfHeight &&
+            ball.position.z <= halfHeight
+        );
+    }
+
+    // Ajout d'un gestionnaire d'événements pour les boutons d'équipe
+    document.getElementById('team1').addEventListener('click', () => {
+        selectTeam(1);
+        animate();
+    });
+
+    document.getElementById('team2').addEventListener('click', () => {
+        selectTeam(2);
+        animate();
+    });
+
+    // Fonction pour gérer la sélection d'équipe
+    function selectTeam(team) {
+        // Masquer l'interface de sélection d'équipe
+        document.getElementById('team-selection').style.display = 'none';
+
+        // Déplacer le cube du joueur en fonction de l'équipe sélectionnée
+        if (team === 1) {
+            players[socket.id].position.set(-wallWidth / 3 + 1, 0, 0); // Devant le but de l'Équipe 1
+        } else {
+            players[socket.id].position.set(wallWidth / 3 - 1, 0, 0); // Devant le but de l'Équipe 2
+        }
+
+        // Envoi des nouvelles positions au serveur
+        socket.emit('move', { x: players[socket.id].position.x, z: players[socket.id].position.z });
+    }
+</script>
+</body>
+</html>
